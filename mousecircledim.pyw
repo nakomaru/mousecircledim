@@ -42,7 +42,9 @@ def _bootstrap():
 _bootstrap()
 
 # --- real imports ---------------------------------------------------------
+import configparser
 import ctypes
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -53,7 +55,7 @@ from ctypes import (
 import win32api
 import win32con
 import win32ts
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageTk
 import pystray
 
 user32 = ctypes.windll.user32
@@ -199,30 +201,97 @@ magnification.MagSetFullscreenColorEffect.restype = wintypes.BOOL
 
 
 # === USER SETTINGS ========================================================
-IDLE_COLOR         = (0.88, 0.94, 1.00)
-LEFT_CLICK_COLOR   = (0.48, 0.87, 0.30)
-RIGHT_CLICK_COLOR  = (0.87, 0.30, 0.22)
-MIDDLE_CLICK_COLOR = (0.30, 0.48, 0.87)
+# Defaults; overridden by INI at INI_PATH (same folder as this script).
+INI_PATH = Path(__file__).resolve().parent / "mousecircledim.ini"
 
-RING_RADIUS       = 41
-RING_THICKNESS    = 6
-RING_ALPHA_CENTER = 0.50
-RING_ALPHA_EDGE   = 0.40
+_DEFAULTS = {
+    "circle": {
+        "IDLE_COLOR":         "0.90, 0.95, 1.00",
+        "LEFT_CLICK_COLOR":   "0.50, 0.85, 0.30",
+        "RIGHT_CLICK_COLOR":  "0.85, 0.30, 0.20",
+        "MIDDLE_CLICK_COLOR": "0.30, 0.50, 0.85",
+        "RING_RADIUS":       "41",
+        "RING_THICKNESS":    "6",
+        "RING_ALPHA_CENTER": "0.50",
+        "RING_ALPHA_EDGE":   "0.40",
+        "HALO_ENABLED":          "true",
+        "HALO_THICKNESS_FACTOR": "2",
+        "HALO_COLOR_SCALE":      "0.2",
+        "HALO_ALPHA_INNER":      "0.25",
+        "HALO_ALPHA_OUTER":      "0.05",
+        "RIPPLE_THICKNESS": "3",
+        "RIPPLE_GROWTH":    "3.0",
+        "RIPPLE_DURATION":  "1.0",
+        "TARGET_FPS": "120",
+        "PADDING":    "4",
+        "ENABLED":    "true",
+    },
+    "dim": {
+        "LEVELS": "90, 85, 80, 70, 60, 50, 40, 30, 20, 10, 0",
+        "LAST_LEVEL": "0",
+        "LAST_NONZERO": "40",
+    },
+}
 
-HALO_ENABLED          = True
-HALO_THICKNESS_FACTOR = 2
-HALO_COLOR_SCALE      = 0.2
-HALO_ALPHA_INNER      = 0.25
-HALO_ALPHA_OUTER      = 0.05
+_cfg = configparser.ConfigParser()
+for sec, opts in _DEFAULTS.items():
+    _cfg[sec] = dict(opts)
+if INI_PATH.exists():
+    try:
+        _cfg.read(INI_PATH, encoding="utf-8")
+    except Exception as e:
+        sys.stderr.write(f"failed to read {INI_PATH}: {e}\n")
 
-RIPPLE_THICKNESS = 3
-RIPPLE_GROWTH    = 3.0
-RIPPLE_DURATION  = 1.0
 
-TARGET_FPS = 120
-PADDING    = 4
+def _tuple(s):
+    return tuple(float(x.strip()) for x in s.split(","))
 
-LEVELS = [90, 85, 80, 70, 60, 50, 40, 30, 20, 10, 0]
+
+def _int_list(s):
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
+_c = _cfg["circle"]
+IDLE_COLOR         = _tuple(_c["IDLE_COLOR"])
+LEFT_CLICK_COLOR   = _tuple(_c["LEFT_CLICK_COLOR"])
+RIGHT_CLICK_COLOR  = _tuple(_c["RIGHT_CLICK_COLOR"])
+MIDDLE_CLICK_COLOR = _tuple(_c["MIDDLE_CLICK_COLOR"])
+
+RING_RADIUS       = _c.getint("RING_RADIUS")
+RING_THICKNESS    = _c.getint("RING_THICKNESS")
+RING_ALPHA_CENTER = _c.getfloat("RING_ALPHA_CENTER")
+RING_ALPHA_EDGE   = _c.getfloat("RING_ALPHA_EDGE")
+
+HALO_ENABLED          = _c.getboolean("HALO_ENABLED")
+HALO_THICKNESS_FACTOR = _c.getint("HALO_THICKNESS_FACTOR")
+HALO_COLOR_SCALE      = _c.getfloat("HALO_COLOR_SCALE")
+HALO_ALPHA_INNER      = _c.getfloat("HALO_ALPHA_INNER")
+HALO_ALPHA_OUTER      = _c.getfloat("HALO_ALPHA_OUTER")
+
+RIPPLE_THICKNESS = _c.getint("RIPPLE_THICKNESS")
+RIPPLE_GROWTH    = _c.getfloat("RIPPLE_GROWTH")
+RIPPLE_DURATION  = _c.getfloat("RIPPLE_DURATION")
+
+TARGET_FPS = _c.getint("TARGET_FPS")
+PADDING    = _c.getint("PADDING")
+CIRCLE_ENABLED = _c.getboolean("ENABLED")
+
+LEVELS = _int_list(_cfg["dim"]["LEVELS"])
+INITIAL_LEVEL = _cfg["dim"].getint("LAST_LEVEL")
+INITIAL_NONZERO = _cfg["dim"].getint("LAST_NONZERO")
+
+
+def _save_ini():
+    try:
+        with open(INI_PATH, "w", encoding="utf-8") as f:
+            _cfg.write(f)
+    except Exception as e:
+        sys.stderr.write(f"failed to write {INI_PATH}: {e}\n")
+
+
+# Ensure INI exists on first run so users can find/edit it.
+if not INI_PATH.exists():
+    _save_ini()
 
 
 # === DERIVED ==============================================================
@@ -245,18 +314,68 @@ def _window_size(ring_radius_max, stroke_thickness):
     return _odd(extent * 2)
 
 
-_IDLE_RGB   = _rgb255(IDLE_COLOR)
-_LEFT_RGB   = _rgb255(LEFT_CLICK_COLOR)
-_RIGHT_RGB  = _rgb255(RIGHT_CLICK_COLOR)
-_MIDDLE_RGB = _rgb255(MIDDLE_CLICK_COLOR)
+_IDLE_RGB = _LEFT_RGB = _RIGHT_RGB = _MIDDLE_RGB = (0, 0, 0)
+_RING_ALPHA_CENTER_U8 = _RING_ALPHA_EDGE_U8 = 0
+_HALO_ALPHA_INNER_U8 = _HALO_ALPHA_OUTER_U8 = 0
+CURSOR_WINDOW_SIZE = 0
+RIPPLE_WINDOW_SIZE = 0
 
-_RING_ALPHA_CENTER_U8 = _u8(RING_ALPHA_CENTER)
-_RING_ALPHA_EDGE_U8   = _u8(RING_ALPHA_EDGE)
-_HALO_ALPHA_INNER_U8  = _u8(HALO_ALPHA_INNER)
-_HALO_ALPHA_OUTER_U8  = _u8(HALO_ALPHA_OUTER)
 
-CURSOR_WINDOW_SIZE = _window_size(RING_RADIUS, RING_THICKNESS)
-RIPPLE_WINDOW_SIZE = _window_size(RING_RADIUS * RIPPLE_GROWTH, RIPPLE_THICKNESS)
+def recompute_derived():
+    global _IDLE_RGB, _LEFT_RGB, _RIGHT_RGB, _MIDDLE_RGB
+    global _RING_ALPHA_CENTER_U8, _RING_ALPHA_EDGE_U8
+    global _HALO_ALPHA_INNER_U8, _HALO_ALPHA_OUTER_U8
+    global CURSOR_WINDOW_SIZE, RIPPLE_WINDOW_SIZE
+    _IDLE_RGB   = _rgb255(IDLE_COLOR)
+    _LEFT_RGB   = _rgb255(LEFT_CLICK_COLOR)
+    _RIGHT_RGB  = _rgb255(RIGHT_CLICK_COLOR)
+    _MIDDLE_RGB = _rgb255(MIDDLE_CLICK_COLOR)
+    _RING_ALPHA_CENTER_U8 = _u8(RING_ALPHA_CENTER)
+    _RING_ALPHA_EDGE_U8   = _u8(RING_ALPHA_EDGE)
+    _HALO_ALPHA_INNER_U8  = _u8(HALO_ALPHA_INNER)
+    _HALO_ALPHA_OUTER_U8  = _u8(HALO_ALPHA_OUTER)
+    CURSOR_WINDOW_SIZE = _window_size(RING_RADIUS, RING_THICKNESS)
+    RIPPLE_WINDOW_SIZE = _window_size(RING_RADIUS * RIPPLE_GROWTH, RIPPLE_THICKNESS)
+
+
+recompute_derived()
+
+
+def apply_circle_settings_from_cfg():
+    """Re-read [circle] into module globals + recompute derived. Returns
+    True if CURSOR_WINDOW_SIZE changed (caller should recreate cursor window)."""
+    global IDLE_COLOR, LEFT_CLICK_COLOR, RIGHT_CLICK_COLOR, MIDDLE_CLICK_COLOR
+    global RING_RADIUS, RING_THICKNESS, RING_ALPHA_CENTER, RING_ALPHA_EDGE
+    global HALO_ENABLED, HALO_THICKNESS_FACTOR, HALO_COLOR_SCALE
+    global HALO_ALPHA_INNER, HALO_ALPHA_OUTER
+    global RIPPLE_THICKNESS, RIPPLE_GROWTH, RIPPLE_DURATION
+    global TARGET_FPS, PADDING
+    old_size = CURSOR_WINDOW_SIZE
+    c = _cfg["circle"]
+    try:
+        IDLE_COLOR         = _tuple(c["IDLE_COLOR"])
+        LEFT_CLICK_COLOR   = _tuple(c["LEFT_CLICK_COLOR"])
+        RIGHT_CLICK_COLOR  = _tuple(c["RIGHT_CLICK_COLOR"])
+        MIDDLE_CLICK_COLOR = _tuple(c["MIDDLE_CLICK_COLOR"])
+        RING_RADIUS       = c.getint("RING_RADIUS")
+        RING_THICKNESS    = c.getint("RING_THICKNESS")
+        RING_ALPHA_CENTER = c.getfloat("RING_ALPHA_CENTER")
+        RING_ALPHA_EDGE   = c.getfloat("RING_ALPHA_EDGE")
+        HALO_ENABLED          = c.getboolean("HALO_ENABLED")
+        HALO_THICKNESS_FACTOR = c.getint("HALO_THICKNESS_FACTOR")
+        HALO_COLOR_SCALE      = c.getfloat("HALO_COLOR_SCALE")
+        HALO_ALPHA_INNER      = c.getfloat("HALO_ALPHA_INNER")
+        HALO_ALPHA_OUTER      = c.getfloat("HALO_ALPHA_OUTER")
+        RIPPLE_THICKNESS = c.getint("RIPPLE_THICKNESS")
+        RIPPLE_GROWTH    = c.getfloat("RIPPLE_GROWTH")
+        RIPPLE_DURATION  = c.getfloat("RIPPLE_DURATION")
+        TARGET_FPS = c.getint("TARGET_FPS")
+        PADDING    = c.getint("PADDING")
+    except Exception as e:
+        sys.stderr.write(f"invalid circle setting: {e}\n")
+        return False
+    recompute_derived()
+    return CURSOR_WINDOW_SIZE != old_size
 
 
 # --- icons ----------------------------------------------------------------
@@ -265,10 +384,12 @@ def make_tray_icon(size=64):
     d = ImageDraw.Draw(img)
     # moon (dimmer)
     pad = 6
-    d.ellipse((pad, pad, size - pad, size - pad), fill=(230, 230, 245, 255))
+    stroke = max(1, size // 32)
+    d.ellipse((pad, pad, size - pad, size - pad),
+              fill=(230, 230, 245, 255), outline=(0, 0, 0, 255), width=stroke)
     off = size // 4
     d.ellipse((pad + off, pad - 2, size - pad + off, size - pad - 2),
-              fill=(0, 0, 0, 0))
+              fill=(0, 0, 0, 0), outline=(0, 0, 0, 255), width=stroke)
     # small crosshair ring (mouse circle) overlaid bottom-right
     c = (124, 255, 121, 255)
     r = size // 3
@@ -438,6 +559,7 @@ class LayeredWindow:
             _windows_by_hwnd.pop(int(self.hwnd), None)
             if self._session_notify:
                 wtsapi32.WTSUnRegisterSessionNotification(self.hwnd)
+                self._session_notify = False
             gdi32.SelectObject(self.mem_dc, self.old_obj)
             gdi32.DeleteObject(self.hbitmap)
             gdi32.DeleteDC(self.mem_dc)
@@ -450,11 +572,15 @@ class LayeredWindow:
 class MouseCircle:
     def __init__(self):
         self.running = True
-        self.enabled = True
+        self.enabled = CIRCLE_ENABLED
         self.visible = True  # session state
         self.cursor_window = None
         self.ripples = []
         self._ready = threading.Event()
+        self._reconfig_pending = False
+
+    def request_reconfigure(self):
+        self._reconfig_pending = True
 
     def set_enabled(self, value):
         self.enabled = bool(value)
@@ -511,8 +637,9 @@ class MouseCircle:
         return pressed_color
 
     def _render_cursor(self, x, y, color):
-        center = CURSOR_WINDOW_SIZE // 2
-        img = Image.new("RGBA", (CURSOR_WINDOW_SIZE, CURSOR_WINDOW_SIZE), (0, 0, 0, 0))
+        size = self.cursor_window.size
+        center = size // 2
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         halo_rgb = (tuple(int(c * HALO_COLOR_SCALE) for c in color)
                     if HALO_ENABLED else None)
         aa_ring(
@@ -528,7 +655,6 @@ class MouseCircle:
     def _render_ripples(self):
         now = time.monotonic()
         alive = []
-        center = RIPPLE_WINDOW_SIZE // 2
         for r in self.ripples:
             t = (now - r["start"]) / RIPPLE_DURATION
             if t >= 1.0:
@@ -538,7 +664,9 @@ class MouseCircle:
             progress = 1 - (1 - (t - 1) ** 2) ** 0.5
             radius = int(RING_RADIUS * RIPPLE_GROWTH * progress)
             fade = max(0.0, 1.0 - t)
-            img = Image.new("RGBA", (RIPPLE_WINDOW_SIZE, RIPPLE_WINDOW_SIZE), (0, 0, 0, 0))
+            size = r["window"].size
+            center = size // 2
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
             halo_rgb = (tuple(int(c * HALO_COLOR_SCALE) for c in r["color"])
                         if HALO_ENABLED else None)
             aa_ring(
@@ -580,7 +708,6 @@ class MouseCircle:
         self._ready.set()
 
         msg = MSG()
-        target_dt = 1 / TARGET_FPS
         next_tick = time.monotonic()
         while self.running:
             while user32.PeekMessageW(byref(msg), None, 0, 0, PM_REMOVE):
@@ -591,6 +718,19 @@ class MouseCircle:
                 user32.DispatchMessageW(byref(msg))
             if not self.running:
                 break
+            if self._reconfig_pending:
+                self._reconfig_pending = False
+                try:
+                    old = self.cursor_window
+                    self.cursor_window = LayeredWindow(
+                        CURSOR_WINDOW_SIZE, session_notify=True)
+                    self.cursor_window.on_session_change = self._on_session_change
+                    if not (self.enabled and self.visible):
+                        self.cursor_window.show(False)
+                    self.cursor_window.bring_to_top()
+                    old.destroy()
+                except Exception as e:
+                    sys.stderr.write(f"reconfigure failed: {e}\n")
             if self.enabled and self.visible:
                 try:
                     self._render()
@@ -602,7 +742,7 @@ class MouseCircle:
                 for r in self.ripples:
                     r["window"].destroy()
                 self.ripples = []
-            next_tick += target_dt
+            next_tick += 1 / max(1, TARGET_FPS)
             sleep = next_tick - time.monotonic()
             if sleep > 0:
                 time.sleep(sleep)
@@ -633,9 +773,12 @@ def mag_set_scale(s):
 class App:
     def __init__(self):
         self.level = 0
-        self.last_nonzero = 40
+        self.last_nonzero = INITIAL_NONZERO if INITIAL_NONZERO > 0 else 40
         self._anim_job = None
         self._current = 0.0
+        self._save_job = None
+        self._settings_win = None
+        self._reconfig_job = None
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -648,6 +791,7 @@ class App:
         self.mouse_thread = threading.Thread(target=self.mouse.run, daemon=True)
         self.mouse_thread.start()
         self.mouse._ready.wait(timeout=5)
+        self.mouse.set_enabled(CIRCLE_ENABLED)
 
         def level_item(p):
             def on_click(_icon, _item):
@@ -682,11 +826,15 @@ class App:
                 *(level_item(p) for p in LEVELS),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Mouse circle", on_mouse_circle, checked=mouse_checked),
+                pystray.MenuItem("Edit settings…", self._open_settings),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", self._tray_quit),
             ),
         )
         threading.Thread(target=self.tray.run, daemon=True).start()
+
+        if INITIAL_LEVEL > 0:
+            self.root.after(0, lambda: self._set(INITIAL_LEVEL))
 
     def _apply(self, a):
         self._current = a
@@ -700,10 +848,34 @@ class App:
         if p > 0:
             self.last_nonzero = p
         self._animate_to(p / 100.0, duration_ms=500)
+        _cfg["dim"]["LAST_LEVEL"] = str(p)
+        _cfg["dim"]["LAST_NONZERO"] = str(self.last_nonzero)
+        self._schedule_save()
         try:
             self.tray.update_menu()
         except Exception:
             pass
+
+    def _schedule_save(self, delay_ms=3000):
+        if self._save_job is not None:
+            try:
+                self.root.after_cancel(self._save_job)
+            except Exception:
+                pass
+        self._save_job = self.root.after(delay_ms, self._do_save)
+
+    def _do_save(self):
+        self._save_job = None
+        _save_ini()
+
+    def _flush_save(self):
+        if self._save_job is not None:
+            try:
+                self.root.after_cancel(self._save_job)
+            except Exception:
+                pass
+            self._save_job = None
+            _save_ini()
 
     def _animate_to(self, target, duration_ms=500, step_ms=16):
         if self._anim_job is not None:
@@ -741,15 +913,183 @@ class App:
 
     def _toggle_mouse_circle(self):
         self.mouse.set_enabled(not self.mouse.enabled)
+        _cfg["circle"]["ENABLED"] = "true" if self.mouse.enabled else "false"
+        self._schedule_save()
         try:
             self.tray.update_menu()
         except Exception:
             pass
 
+    def _open_settings(self, _icon=None, _item=None):
+        self.root.after(0, self._show_settings_window)
+
+    def _show_settings_window(self):
+        if self._settings_win is not None and self._settings_win.winfo_exists():
+            self._settings_win.lift()
+            self._settings_win.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._settings_win = win
+        win.title("MouseCircleDim settings")
+        win.resizable(False, False)
+        try:
+            icon_photo = ImageTk.PhotoImage(make_tray_icon(32), master=win)
+            win.iconphoto(True, icon_photo)
+            win._icon_ref = icon_photo  # prevent GC
+        except Exception:
+            pass
+
+        # kind: "int" | "f1" | "f2" | "bool" | "color"
+        # (section, key, label, kind, min, max, step)
+        FIELDS = [
+            ("circle", "IDLE_COLOR",         "Idle color (R G B)",     "color"),
+            ("circle", "LEFT_CLICK_COLOR",   "Left-click color",       "color"),
+            ("circle", "RIGHT_CLICK_COLOR",  "Right-click color",      "color"),
+            ("circle", "MIDDLE_CLICK_COLOR", "Middle-click color",     "color"),
+            ("circle", "RING_RADIUS",        "Ring radius (px)",       "int",  1,  500, 1),
+            ("circle", "RING_THICKNESS",     "Ring thickness (px)",    "int",  1,   60, 1),
+            ("circle", "RING_ALPHA_CENTER",  "Ring alpha (center)",    "f2",   0.0, 1.0, 0.05),
+            ("circle", "RING_ALPHA_EDGE",    "Ring alpha (edge)",      "f2",   0.0, 1.0, 0.05),
+            ("circle", "HALO_ENABLED",          "Halo enabled",        "bool"),
+            ("circle", "HALO_THICKNESS_FACTOR", "Halo thickness ×",    "int",  1,  10, 1),
+            ("circle", "HALO_COLOR_SCALE",      "Halo color scale",    "f2",   0.0, 1.0, 0.05),
+            ("circle", "HALO_ALPHA_INNER",      "Halo alpha (inner)",  "f2",   0.0, 1.0, 0.05),
+            ("circle", "HALO_ALPHA_OUTER",      "Halo alpha (outer)",  "f2",   0.0, 1.0, 0.05),
+            ("circle", "RIPPLE_THICKNESS", "Ripple thickness (px)",    "int",  1,  40, 1),
+            ("circle", "RIPPLE_GROWTH",    "Ripple growth ×",          "f1",   1.0, 10.0, 0.1),
+            ("circle", "RIPPLE_DURATION",  "Ripple duration (s)",      "f1",   0.1, 10.0, 0.1),
+            ("circle", "TARGET_FPS",       "Target FPS",               "int",  15, 240, 5),
+            ("circle", "PADDING",          "Padding (px)",             "int",  0,  50, 1),
+        ]
+
+        def bind_wheel(spin):
+            def on_wheel(e):
+                spin.invoke("buttonup" if e.delta > 0 else "buttondown")
+                return "break"
+            spin.bind("<MouseWheel>", on_wheel)
+
+        FMT = {"int": "%.0f", "f1": "%.1f", "f2": "%.2f"}
+
+        def make_spin(parent, kind, lo, hi, step, initial, build_edit):
+            """build_edit(var) -> on_edit callable. Ensures closure captures
+            this iteration's var, not the loop's trailing binding."""
+            fmt = FMT[kind]
+            var = tk.StringVar(value=fmt % float(initial))
+            on_edit = build_edit(var)
+            sp = tk.Spinbox(
+                parent, from_=lo, to=hi, increment=step, format=fmt,
+                textvariable=var, width=7, justify="right",
+                command=on_edit,
+            )
+            var.trace_add("write", lambda *_: on_edit())
+            bind_wheel(sp)
+            return sp, var
+
+        frame = tk.Frame(win, padx=12, pady=12)
+        frame.pack(fill="both", expand=True)
+
+        reset_actions = []
+
+        def commit(section, key, value):
+            _cfg[section][key] = value
+            self._schedule_save()
+            self._apply_live()
+
+        for row, spec in enumerate(FIELDS):
+            section, key, label, kind = spec[:4]
+            tk.Label(frame, text=label, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(0, 10), pady=2)
+
+            if kind == "bool":
+                var = tk.BooleanVar(value=_cfg[section].getboolean(key))
+                def make_cb(section=section, key=key, var=var):
+                    def cb(*_):
+                        commit(section, key, "true" if var.get() else "false")
+                    return cb
+                tk.Checkbutton(frame, variable=var, command=make_cb()).grid(
+                    row=row, column=1, sticky="w", pady=2)
+                default_str = _DEFAULTS[section][key]
+                reset_actions.append(
+                    lambda v=var, d=default_str: v.set(d.lower() == "true"))
+
+            elif kind == "color":
+                vals = [float(x.strip()) for x in _cfg[section][key].split(",")]
+                vals = (vals + [0.0, 0.0, 0.0])[:3]
+                holder = tk.Frame(frame)
+                holder.grid(row=row, column=1, sticky="w", pady=2)
+                stringvars = []
+                def color_on_edit(section=section, key=key, svs=stringvars):
+                    try:
+                        parts = ["%.2f" % float(sv.get()) for sv in svs]
+                    except ValueError:
+                        return
+                    commit(section, key, ", ".join(parts))
+                def build_color_edit(_var):
+                    return color_on_edit
+                for i, v in enumerate(vals):
+                    sp, sv = make_spin(holder, "f2", 0.0, 1.0, 0.05, v, build_color_edit)
+                    sp.pack(side="left", padx=(0 if i == 0 else 4, 0))
+                    stringvars.append(sv)
+                default_parts = [float(x.strip())
+                                 for x in _DEFAULTS[section][key].split(",")]
+                def reset_color(svs=stringvars, parts=default_parts):
+                    for sv, p in zip(svs, parts):
+                        sv.set("%.2f" % p)
+                reset_actions.append(reset_color)
+
+            else:
+                lo, hi, step = spec[4], spec[5], spec[6]
+                initial = float(_cfg[section][key])
+                fmt = FMT[kind]
+                def build_edit(var, section=section, key=key, fmt=fmt):
+                    def on_edit():
+                        try:
+                            commit(section, key, fmt % float(var.get()))
+                        except ValueError:
+                            return
+                    return on_edit
+                sp, var = make_spin(frame, kind, lo, hi, step, initial, build_edit)
+                sp.grid(row=row, column=1, sticky="w", pady=2)
+                default_str = _DEFAULTS[section][key]
+                reset_actions.append(
+                    lambda v=var, fmt=fmt, d=default_str: v.set(fmt % float(d)))
+
+        btns = tk.Frame(frame)
+        btns.grid(row=len(FIELDS), column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        tk.Button(btns, text="Defaults",
+                  command=lambda: [a() for a in reset_actions]).pack(side="left", padx=4)
+        tk.Button(btns, text="Close", command=lambda: on_close()).pack(side="right", padx=4)
+
+        def on_close():
+            self._flush_save()
+            win.destroy()
+            self._settings_win = None
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+    def _apply_live(self):
+        resized = apply_circle_settings_from_cfg()
+        if resized:
+            if self._reconfig_job is not None:
+                try:
+                    self.root.after_cancel(self._reconfig_job)
+                except Exception:
+                    pass
+            self._reconfig_job = self.root.after(200, self._do_reconfig)
+
+    def _do_reconfig(self):
+        self._reconfig_job = None
+        self.mouse.request_reconfigure()
+
     def _tray_quit(self, _icon, _item):
         self.root.after(0, self.quit)
 
     def quit(self):
+        try:
+            self._flush_save()
+        except Exception:
+            pass
         try:
             self.mouse.post_exit()
         except Exception:
