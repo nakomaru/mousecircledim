@@ -62,6 +62,11 @@ user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 kernel32 = ctypes.windll.kernel32
 wtsapi32 = ctypes.windll.wtsapi32
+winmm = ctypes.windll.winmm
+winmm.timeBeginPeriod.argtypes = [wintypes.UINT]
+winmm.timeBeginPeriod.restype = wintypes.UINT
+winmm.timeEndPeriod.argtypes = [wintypes.UINT]
+winmm.timeEndPeriod.restype = wintypes.UINT
 
 # --- DPI awareness (must run before Magnification init) -------------------
 try:
@@ -93,6 +98,8 @@ HWND_TOPMOST = -1
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
+SWP_NOZORDER = 0x0004
+SWP_NOREDRAW = 0x0008
 WM_DESTROY = 0x0002
 WM_WTSSESSION_CHANGE = 0x02B1
 WTS_SESSION_LOCK = 0x7
@@ -206,32 +213,37 @@ INI_PATH = Path(__file__).resolve().parent / "mousecircledim.ini"
 
 _DEFAULTS = {
     "circle": {
-        "IDLE_COLOR":         "0.90, 0.95, 1.00",
+        "IDLE_COLOR":         "0.80, 0.95, 0.95",
         "LEFT_CLICK_COLOR":   "0.50, 0.85, 0.30",
         "RIGHT_CLICK_COLOR":  "0.85, 0.30, 0.20",
-        "MIDDLE_CLICK_COLOR": "0.30, 0.50, 0.85",
+        "MIDDLE_CLICK_COLOR": "0.40, 0.55, 0.90",
         "RING_RADIUS":       "41",
         "RING_THICKNESS":    "6",
         "RING_ALPHA_CENTER": "0.50",
         "RING_ALPHA_EDGE":   "0.40",
         "HALO_ENABLED":          "true",
         "HALO_THICKNESS_FACTOR": "2",
-        "HALO_COLOR_SCALE":      "0.2",
-        "HALO_ALPHA_INNER":      "0.25",
-        "HALO_ALPHA_OUTER":      "0.05",
-        "RIPPLE_THICKNESS": "3",
-        "RIPPLE_GROWTH":    "3.0",
-        "RIPPLE_DURATION":  "1.0",
+        "HALO_COLOR_SCALE":      "0.40",
+        "HALO_ALPHA_INNER":      "0.50",
+        "HALO_ALPHA_OUTER":      "0.15",
+        "RING_ENABLED":      "true",
+        "RIPPLE_ENABLED":    "true",
+        "RIPPLE_THICKNESS":  "3",
+        "RIPPLE_SIZE_FACTOR": "2.0",
+        "RIPPLE_DURATION":   "1.0",
         "TARGET_FPS": "120",
-        "PADDING":    "4",
         "ENABLED":    "true",
     },
     "dim": {
         "LEVELS": "90, 85, 80, 70, 60, 50, 40, 30, 20, 10, 0",
         "LAST_LEVEL": "0",
-        "LAST_NONZERO": "40",
+        "LAST_NONZERO": "30",
     },
 }
+
+# Fixed layout constants (not user-configurable).
+PADDING = 1
+TOPMOST_REASSERT_INTERVAL = 0.5
 
 _cfg = configparser.ConfigParser()
 for sec, opts in _DEFAULTS.items():
@@ -241,6 +253,14 @@ if INI_PATH.exists():
         _cfg.read(INI_PATH, encoding="utf-8")
     except Exception as e:
         sys.stderr.write(f"failed to read {INI_PATH}: {e}\n")
+
+# Migrate / prune legacy keys.
+if _cfg.has_section("circle"):
+    if _cfg["circle"].get("RIPPLE_GROWTH") is not None:
+        if "RIPPLE_SIZE_FACTOR" not in _cfg["circle"]:
+            _cfg["circle"]["RIPPLE_SIZE_FACTOR"] = _cfg["circle"]["RIPPLE_GROWTH"]
+        _cfg["circle"].pop("RIPPLE_GROWTH", None)
+    _cfg["circle"].pop("PADDING", None)
 
 
 def _tuple(s):
@@ -268,12 +288,13 @@ HALO_COLOR_SCALE      = _c.getfloat("HALO_COLOR_SCALE")
 HALO_ALPHA_INNER      = _c.getfloat("HALO_ALPHA_INNER")
 HALO_ALPHA_OUTER      = _c.getfloat("HALO_ALPHA_OUTER")
 
+RING_ENABLED     = _c.getboolean("RING_ENABLED")
+RIPPLE_ENABLED   = _c.getboolean("RIPPLE_ENABLED")
 RIPPLE_THICKNESS = _c.getint("RIPPLE_THICKNESS")
-RIPPLE_GROWTH    = _c.getfloat("RIPPLE_GROWTH")
+RIPPLE_SIZE_FACTOR = _c.getfloat("RIPPLE_SIZE_FACTOR")
 RIPPLE_DURATION  = _c.getfloat("RIPPLE_DURATION")
 
 TARGET_FPS = _c.getint("TARGET_FPS")
-PADDING    = _c.getint("PADDING")
 CIRCLE_ENABLED = _c.getboolean("ENABLED")
 
 LEVELS = _int_list(_cfg["dim"]["LEVELS"])
@@ -335,7 +356,7 @@ def recompute_derived():
     _HALO_ALPHA_INNER_U8  = _u8(HALO_ALPHA_INNER)
     _HALO_ALPHA_OUTER_U8  = _u8(HALO_ALPHA_OUTER)
     CURSOR_WINDOW_SIZE = _window_size(RING_RADIUS, RING_THICKNESS)
-    RIPPLE_WINDOW_SIZE = _window_size(RING_RADIUS * RIPPLE_GROWTH, RIPPLE_THICKNESS)
+    RIPPLE_WINDOW_SIZE = _window_size(RING_RADIUS * RIPPLE_SIZE_FACTOR, RIPPLE_THICKNESS)
 
 
 recompute_derived()
@@ -348,8 +369,9 @@ def apply_circle_settings_from_cfg():
     global RING_RADIUS, RING_THICKNESS, RING_ALPHA_CENTER, RING_ALPHA_EDGE
     global HALO_ENABLED, HALO_THICKNESS_FACTOR, HALO_COLOR_SCALE
     global HALO_ALPHA_INNER, HALO_ALPHA_OUTER
-    global RIPPLE_THICKNESS, RIPPLE_GROWTH, RIPPLE_DURATION
-    global TARGET_FPS, PADDING
+    global RING_ENABLED, RIPPLE_ENABLED
+    global RIPPLE_THICKNESS, RIPPLE_SIZE_FACTOR, RIPPLE_DURATION
+    global TARGET_FPS
     old_size = CURSOR_WINDOW_SIZE
     c = _cfg["circle"]
     try:
@@ -366,11 +388,12 @@ def apply_circle_settings_from_cfg():
         HALO_COLOR_SCALE      = c.getfloat("HALO_COLOR_SCALE")
         HALO_ALPHA_INNER      = c.getfloat("HALO_ALPHA_INNER")
         HALO_ALPHA_OUTER      = c.getfloat("HALO_ALPHA_OUTER")
+        RING_ENABLED     = c.getboolean("RING_ENABLED")
+        RIPPLE_ENABLED   = c.getboolean("RIPPLE_ENABLED")
         RIPPLE_THICKNESS = c.getint("RIPPLE_THICKNESS")
-        RIPPLE_GROWTH    = c.getfloat("RIPPLE_GROWTH")
+        RIPPLE_SIZE_FACTOR = c.getfloat("RIPPLE_SIZE_FACTOR")
         RIPPLE_DURATION  = c.getfloat("RIPPLE_DURATION")
         TARGET_FPS = c.getint("TARGET_FPS")
-        PADDING    = c.getint("PADDING")
     except Exception as e:
         sys.stderr.write(f"invalid circle setting: {e}\n")
         return False
@@ -544,6 +567,15 @@ class LayeredWindow:
     def update_at_cursor(self, cursor_x, cursor_y, rgba_bytes):
         self.update_at(cursor_x - self.size // 2, cursor_y - self.size // 2, rgba_bytes)
 
+    def move_to(self, top_left_x, top_left_y):
+        user32.SetWindowPos(
+            self.hwnd, wintypes.HWND(0), top_left_x, top_left_y, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+        )
+
+    def move_to_cursor(self, cursor_x, cursor_y):
+        self.move_to(cursor_x - self.size // 2, cursor_y - self.size // 2)
+
     def show(self, visible):
         user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE if visible else SW_HIDE)
 
@@ -580,6 +612,19 @@ class MouseCircle:
         self.ripples = []
         self._ready = threading.Event()
         self._reconfig_pending = False
+        self._cursor_tile_cache = {}
+        self._ripple_frame_cache = {}
+        self._last_pos = None
+        self._last_color = None
+        self._cursor_drawn = False
+        self._cursor_shown = False
+
+    def invalidate_caches(self):
+        self._cursor_tile_cache.clear()
+        self._ripple_frame_cache.clear()
+        self._cursor_drawn = False
+        self._last_pos = None
+        self._last_color = None
 
     def request_reconfigure(self):
         self._reconfig_pending = True
@@ -592,6 +637,10 @@ class MouseCircle:
                 for r in self.ripples:
                     r["window"].destroy()
                 self.ripples = []
+            else:
+                self._cursor_drawn = False
+                self._last_pos = None
+                self._last_color = None
 
     def _on_session_change(self, code):
         if code == WTS_SESSION_LOCK:
@@ -607,6 +656,8 @@ class MouseCircle:
                     r["window"].show(True)
 
     def _spawn_ripple(self, x, y, color):
+        if not RIPPLE_ENABLED:
+            return
         try:
             w = LayeredWindow(RIPPLE_WINDOW_SIZE)
         except Exception as e:
@@ -614,7 +665,7 @@ class MouseCircle:
             return
         self.ripples.append({
             "start": time.monotonic(), "color": color,
-            "x": x, "y": y, "window": w,
+            "x": x, "y": y, "window": w, "last_frame": -1,
         })
 
     def _poll_buttons(self, x, y):
@@ -638,7 +689,7 @@ class MouseCircle:
                 pressed_color = color
         return pressed_color
 
-    def _render_cursor(self, x, y, color):
+    def _build_cursor_bytes(self, color):
         size = self.cursor_window.size
         center = size // 2
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -652,10 +703,49 @@ class MouseCircle:
             halo_alpha_inner=_HALO_ALPHA_INNER_U8,
             halo_alpha_outer=_HALO_ALPHA_OUTER_U8,
         )
-        self.cursor_window.update_at_cursor(x, y, premultiply_bgra(img))
+        return premultiply_bgra(img)
+
+    def _cursor_bytes(self, color):
+        cached = self._cursor_tile_cache.get(color)
+        if cached is None:
+            cached = self._build_cursor_bytes(color)
+            self._cursor_tile_cache[color] = cached
+        return cached
+
+    def _build_ripple_frame(self, color, size, frame_idx, frame_count):
+        t = frame_idx / frame_count
+        progress = 1 - (1 - (t - 1) ** 2) ** 0.5
+        radius = int(RING_RADIUS * RIPPLE_SIZE_FACTOR * progress)
+        fade = max(0.0, 1.0 - t)
+        center = size // 2
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        halo_rgb = (tuple(int(c * HALO_COLOR_SCALE) for c in color)
+                    if HALO_ENABLED else None)
+        aa_ring(
+            img, center, center, radius, RIPPLE_THICKNESS, color,
+            int(_RING_ALPHA_CENTER_U8 * fade), int(_RING_ALPHA_EDGE_U8 * fade),
+            halo_rgb=halo_rgb,
+            halo_thickness=RIPPLE_THICKNESS * HALO_THICKNESS_FACTOR,
+            halo_alpha_inner=int(_HALO_ALPHA_INNER_U8 * fade),
+            halo_alpha_outer=int(_HALO_ALPHA_OUTER_U8 * fade),
+        )
+        return premultiply_bgra(img)
+
+    def _ripple_frame_bytes(self, color, size, frame_idx, frame_count):
+        key = (color, size)
+        cache = self._ripple_frame_cache.get(key)
+        if cache is None or len(cache) != frame_count:
+            cache = [None] * frame_count
+            self._ripple_frame_cache[key] = cache
+        b = cache[frame_idx]
+        if b is None:
+            b = self._build_ripple_frame(color, size, frame_idx, frame_count)
+            cache[frame_idx] = b
+        return b
 
     def _render_ripples(self):
         now = time.monotonic()
+        frame_count = max(1, int(round(RIPPLE_DURATION * max(1, TARGET_FPS))))
         alive = []
         for r in self.ripples:
             t = (now - r["start"]) / RIPPLE_DURATION
@@ -663,24 +753,17 @@ class MouseCircle:
                 r["window"].destroy()
                 continue
             alive.append(r)
-            progress = 1 - (1 - (t - 1) ** 2) ** 0.5
-            radius = int(RING_RADIUS * RIPPLE_GROWTH * progress)
-            fade = max(0.0, 1.0 - t)
+            frame_idx = int(t * frame_count)
+            if frame_idx >= frame_count:
+                frame_idx = frame_count - 1
+            if frame_idx == r["last_frame"]:
+                continue
+            r["last_frame"] = frame_idx
             size = r["window"].size
             center = size // 2
-            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            halo_rgb = (tuple(int(c * HALO_COLOR_SCALE) for c in r["color"])
-                        if HALO_ENABLED else None)
-            aa_ring(
-                img, center, center, radius, RIPPLE_THICKNESS, r["color"],
-                int(_RING_ALPHA_CENTER_U8 * fade), int(_RING_ALPHA_EDGE_U8 * fade),
-                halo_rgb=halo_rgb,
-                halo_thickness=RIPPLE_THICKNESS * HALO_THICKNESS_FACTOR,
-                halo_alpha_inner=int(_HALO_ALPHA_INNER_U8 * fade),
-                halo_alpha_outer=int(_HALO_ALPHA_OUTER_U8 * fade),
-            )
             r["window"].update_at(
-                r["x"] - center, r["y"] - center, premultiply_bgra(img),
+                r["x"] - center, r["y"] - center,
+                self._ripple_frame_bytes(r["color"], size, frame_idx, frame_count),
             )
         self.ripples = alive
 
@@ -690,8 +773,15 @@ class MouseCircle:
         except Exception:
             return
         pressed = self._poll_buttons(x, y)
-        color = pressed or _IDLE_RGB
-        self._render_cursor(x, y, color)
+        if RING_ENABLED:
+            color = pressed or _IDLE_RGB
+            if not self._cursor_drawn or color != self._last_color:
+                self.cursor_window.update_at_cursor(x, y, self._cursor_bytes(color))
+                self._cursor_drawn = True
+            elif (x, y) != self._last_pos:
+                self.cursor_window.move_to_cursor(x, y)
+            self._last_pos = (x, y)
+            self._last_color = color
         self._render_ripples()
 
     def post_exit(self):
@@ -702,6 +792,7 @@ class MouseCircle:
     def run(self):
         self.cursor_window = LayeredWindow(CURSOR_WINDOW_SIZE, session_notify=True)
         self.cursor_window.on_session_change = self._on_session_change
+        self._cursor_shown = True
         self.state = {
             win32con.VK_LBUTTON: win32api.GetKeyState(win32con.VK_LBUTTON),
             win32con.VK_RBUTTON: win32api.GetKeyState(win32con.VK_RBUTTON),
@@ -711,45 +802,70 @@ class MouseCircle:
 
         msg = MSG()
         next_tick = time.monotonic()
-        while self.running:
-            while user32.PeekMessageW(byref(msg), None, 0, 0, PM_REMOVE):
-                if msg.message == WM_QUIT:
-                    self.running = False
+        next_topmost = time.monotonic() + TOPMOST_REASSERT_INTERVAL
+        winmm.timeBeginPeriod(1)
+        try:
+            while self.running:
+                while user32.PeekMessageW(byref(msg), None, 0, 0, PM_REMOVE):
+                    if msg.message == WM_QUIT:
+                        self.running = False
+                        break
+                    user32.TranslateMessage(byref(msg))
+                    user32.DispatchMessageW(byref(msg))
+                if not self.running:
                     break
-                user32.TranslateMessage(byref(msg))
-                user32.DispatchMessageW(byref(msg))
-            if not self.running:
-                break
-            if self._reconfig_pending:
-                self._reconfig_pending = False
-                try:
-                    old = self.cursor_window
-                    self.cursor_window = LayeredWindow(
-                        CURSOR_WINDOW_SIZE, session_notify=True)
-                    self.cursor_window.on_session_change = self._on_session_change
-                    if not (self.enabled and self.visible):
-                        self.cursor_window.show(False)
-                    self.cursor_window.bring_to_top()
-                    old.destroy()
-                except Exception as e:
-                    sys.stderr.write(f"reconfigure failed: {e}\n")
-            if self.enabled and self.visible:
-                try:
-                    self._render()
-                except Exception as e:
-                    sys.stderr.write(f"render error: {e}\n")
-                    time.sleep(0.5)
-            elif self.ripples:
-                # drain any leftover ripples when disabled mid-animation
-                for r in self.ripples:
-                    r["window"].destroy()
-                self.ripples = []
-            next_tick += 1 / max(1, TARGET_FPS)
-            sleep = next_tick - time.monotonic()
-            if sleep > 0:
-                time.sleep(sleep)
-            else:
-                next_tick = time.monotonic()
+                if self._reconfig_pending:
+                    self._reconfig_pending = False
+                    try:
+                        old = self.cursor_window
+                        self.cursor_window = LayeredWindow(
+                            CURSOR_WINDOW_SIZE, session_notify=True)
+                        self.cursor_window.on_session_change = self._on_session_change
+                        self._cursor_shown = True
+                        if not (self.enabled and self.visible and RING_ENABLED):
+                            self.cursor_window.show(False)
+                            self._cursor_shown = False
+                        self.cursor_window.bring_to_top()
+                        old.destroy()
+                        self._cursor_tile_cache.clear()
+                        self._ripple_frame_cache.clear()
+                        self._cursor_drawn = False
+                        self._last_pos = None
+                        self._last_color = None
+                    except Exception as e:
+                        sys.stderr.write(f"reconfigure failed: {e}\n")
+                desired_cursor_shown = (
+                    self.enabled and self.visible and RING_ENABLED)
+                if desired_cursor_shown != self._cursor_shown:
+                    self.cursor_window.show(desired_cursor_shown)
+                    self._cursor_shown = desired_cursor_shown
+                    if not desired_cursor_shown:
+                        self._cursor_drawn = False
+                if self.enabled and self.visible:
+                    try:
+                        self._render()
+                    except Exception as e:
+                        sys.stderr.write(f"render error: {e}\n")
+                        time.sleep(0.5)
+                elif self.ripples:
+                    # drain any leftover ripples when disabled mid-animation
+                    for r in self.ripples:
+                        r["window"].destroy()
+                    self.ripples = []
+                now_mono = time.monotonic()
+                if now_mono >= next_topmost:
+                    if (self.enabled and self.visible and RING_ENABLED
+                            and self.cursor_window is not None):
+                        self.cursor_window.bring_to_top()
+                    next_topmost = now_mono + TOPMOST_REASSERT_INTERVAL
+                next_tick += 1 / max(1, TARGET_FPS)
+                sleep = next_tick - time.monotonic()
+                if sleep > 0:
+                    time.sleep(sleep)
+                else:
+                    next_tick = time.monotonic()
+        finally:
+            winmm.timeEndPeriod(1)
         for r in self.ripples:
             r["window"].destroy()
         if self.cursor_window is not None:
@@ -949,6 +1065,7 @@ class App:
             ("circle", "LEFT_CLICK_COLOR",   "Left-click color",       "color"),
             ("circle", "RIGHT_CLICK_COLOR",  "Right-click color",      "color"),
             ("circle", "MIDDLE_CLICK_COLOR", "Middle-click color",     "color"),
+            ("circle", "RING_ENABLED",       "Ring enabled",           "bool"),
             ("circle", "RING_RADIUS",        "Ring radius (px)",       "int",  1,  500, 1),
             ("circle", "RING_THICKNESS",     "Ring thickness (px)",    "int",  1,   60, 1),
             ("circle", "RING_ALPHA_CENTER",  "Ring alpha (center)",    "f2",   0.0, 1.0, 0.05),
@@ -958,8 +1075,9 @@ class App:
             ("circle", "HALO_COLOR_SCALE",      "Halo color scale",    "f2",   0.0, 1.0, 0.05),
             ("circle", "HALO_ALPHA_INNER",      "Halo alpha (inner)",  "f2",   0.0, 1.0, 0.05),
             ("circle", "HALO_ALPHA_OUTER",      "Halo alpha (outer)",  "f2",   0.0, 1.0, 0.05),
+            ("circle", "RIPPLE_ENABLED",   "Ripple enabled",           "bool"),
             ("circle", "RIPPLE_THICKNESS", "Ripple thickness (px)",    "int",  1,  40, 1),
-            ("circle", "RIPPLE_GROWTH",    "Ripple growth ×",          "f1",   1.0, 10.0, 0.1),
+            ("circle", "RIPPLE_SIZE_FACTOR", "Ripple size ×",          "f1",   1.0, 10.0, 0.1),
             ("circle", "RIPPLE_DURATION",  "Ripple duration (s)",      "f1",   0.1, 10.0, 0.1),
             ("circle", "TARGET_FPS",       "Target FPS",               "int",  15, 240, 5),
         ]
@@ -1071,6 +1189,7 @@ class App:
 
     def _apply_live(self):
         resized = apply_circle_settings_from_cfg()
+        self.mouse.invalidate_caches()
         if resized:
             if self._reconfig_job is not None:
                 try:
