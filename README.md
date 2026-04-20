@@ -9,7 +9,7 @@ Both run from a single tray icon. The tray menu lets you pick a dim level, toggl
 
 ## Settings
 
-Picking **Edit settings…** from the tray menu opens a live settings window for the cursor ring — colors (idle / left / right / middle), ring radius, thickness, alpha gradient, halo, ripple thickness / growth / duration, target FPS, and padding. Changes apply immediately and are written to `mousecircledim.ini` next to the script, so they persist across runs. The INI is auto-created with defaults on first launch; deleting it restores defaults.
+Picking **Edit settings…** from the tray menu opens a live settings window for the cursor ring — colors (idle / left / right / middle), ring radius, thickness, alpha gradient, halo, ripple thickness / growth / duration, and target FPS. Changes apply immediately and are written to `mousecircledim.ini` next to the script, so they persist across runs. The INI is auto-created with defaults on first launch; deleting it restores defaults.
 
 ## Running
 

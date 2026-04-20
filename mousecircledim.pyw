@@ -962,7 +962,6 @@ class App:
             ("circle", "RIPPLE_GROWTH",    "Ripple growth ×",          "f1",   1.0, 10.0, 0.1),
             ("circle", "RIPPLE_DURATION",  "Ripple duration (s)",      "f1",   0.1, 10.0, 0.1),
             ("circle", "TARGET_FPS",       "Target FPS",               "int",  15, 240, 5),
-            ("circle", "PADDING",          "Padding (px)",             "int",  0,  50, 1),
         ]
 
         def bind_wheel(spin):
