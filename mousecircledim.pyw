@@ -87,6 +87,10 @@ AC_SRC_OVER = 0
 AC_SRC_ALPHA = 1
 SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
+HWND_TOPMOST = -1
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOACTIVATE = 0x0010
 WM_DESTROY = 0x0002
 WM_WTSSESSION_CHANGE = 0x02B1
 WTS_SESSION_LOCK = 0x7
@@ -420,6 +424,12 @@ class LayeredWindow:
     def show(self, visible):
         user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE if visible else SW_HIDE)
 
+    def bring_to_top(self):
+        user32.SetWindowPos(
+            self.hwnd, wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+
     def post_exit(self):
         user32.PostMessageW(self.hwnd, WM_APP_EXIT, 0, 0)
 
@@ -492,6 +502,8 @@ class MouseCircle:
                 s = 0
             if s < 0 and self.state[vk] >= 0:
                 self._spawn_ripple(x, y, color)
+                if self.cursor_window is not None:
+                    self.cursor_window.bring_to_top()
                 pressed_color = color
             self.state[vk] = s
             if s < 0 and pressed_color is None:
