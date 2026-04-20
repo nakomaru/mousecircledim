@@ -381,22 +381,24 @@ def apply_circle_settings_from_cfg():
 # --- icons ----------------------------------------------------------------
 def make_tray_icon(size=64):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    # moon (dimmer)
-    pad = 6
-    stroke = max(1, size // 32)
-    d.ellipse((pad, pad, size - pad, size - pad),
-              fill=(230, 230, 245, 255), outline=(0, 0, 0, 255), width=stroke)
+    pad = 4
+    stroke = max(2, size // 24)
     off = size // 4
-    d.ellipse((pad + off, pad - 2, size - pad + off, size - pad - 2),
-              fill=(0, 0, 0, 0), outline=(0, 0, 0, 255), width=stroke)
-    # small crosshair ring (mouse circle) overlaid bottom-right
-    c = (124, 255, 121, 255)
-    r = size // 3
-    cx = size - r // 2 - 2
-    cy = size - r // 2 - 2
-    d.ellipse([cx - r // 2, cy - r // 2, cx + r // 2, cy + r // 2],
-              outline=c, width=2)
+    green = (124, 255, 121, 255)
+    body_box = (pad, pad, size - pad, size - pad)
+    # inner crescent inset from the green ring so they don't overlap
+    inset = pad + stroke + 2
+    cb = (inset, inset, size - inset, size - inset)
+    cut_box = (cb[0] + off, cb[1] - 2, cb[2] + off, cb[3] - 2)
+    shape_mask = Image.new("L", (size, size), 0)
+    sd = ImageDraw.Draw(shape_mask)
+    sd.ellipse(cb, fill=255)
+    sd.ellipse(cut_box, fill=0)
+    crescent = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    crescent.paste((230, 230, 245, 255), mask=shape_mask)
+    img.alpha_composite(crescent)
+    # green outer ring
+    ImageDraw.Draw(img).ellipse(body_box, outline=green, width=stroke)
     return img
 
 
